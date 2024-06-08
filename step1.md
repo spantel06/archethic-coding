@@ -1,4 +1,5 @@
 
+Step 2
 > Services need to run on all interfaces (like 0.0.0.0) and not just localhost.
 <br>
 > Services need to be accessible via HTTP and **not** HTTPS.
