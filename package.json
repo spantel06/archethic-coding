@@ -1,0 +1,13 @@
+{
+  "name": "archethic-uco-transfer",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Transfert de 10 UCO sur le testnet Archethic via le faucet",
+  "main": "transfer.js",
+  "scripts": {
+    "transfer": "node transfer.js"
+  },
+  "dependencies": {
+    "@archethicjs/sdk": "^3.3.3"
+  }
+}
