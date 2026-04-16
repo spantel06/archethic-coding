@@ -8,6 +8,6 @@
     "transfer": "node transfer.js"
   },
   "dependencies": {
-    "@archethicjs/sdk": "^3.3.3"
+    "@archethicjs/sdk": "^2.0.0"
   }
 }

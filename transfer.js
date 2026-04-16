@@ -3,10 +3,10 @@
  *
  * Usage:
  *   SEED=<votre_seed> node transfer.js <adresse_destinataire>
- *   node transfer.js <adresse_destinataire>          (seed aléatoire généré)
+ *   node transfer.js <adresse_destinataire>   (seed aléatoire généré)
  *
  * Étapes :
- *   1. Dériver l'adresse de l'expéditeur depuis la seed
+ *   1. Dériver l'adresse expéditeur depuis la seed
  *   2. Demander des UCO au faucet testnet
  *   3. Attendre que les fonds arrivent
  *   4. Envoyer 10 UCO à l'adresse destinataire
@@ -19,9 +19,8 @@ const TESTNET_URL = "https://testnet.archethic.net";
 const FAUCET_URL  = `${TESTNET_URL}/faucet`;
 const AMOUNT_UCO  = 10;
 
-// Clé d'origine logicielle par défaut pour le testnet (publique / non-secrète)
-const ORIGIN_PRIVATE_KEY =
-  "01019280BDB84B8F8AEDBA205FE3552689964A5626844AA6D5E7072B75A37E0D9C5F";
+// 1 UCO = 100_000_000 unités de base
+const AMOUNT_RAW  = BigInt(AMOUNT_UCO) * 100_000_000n;
 
 // ─── Utilitaires ────────────────────────────────────────────────────────────
 
@@ -33,31 +32,30 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function ucoToRaw(uco) {
-  // 1 UCO = 100 000 000 en unité de base (bigint)
-  return BigInt(Math.round(uco * 1e8));
+function toHex(addressBytes) {
+  return Utils.uint8ArrayToHex(addressBytes);
 }
 
 // ─── Faucet ─────────────────────────────────────────────────────────────────
 
-async function requestFaucet(address) {
-  console.log(`\n[Faucet] Demande d'UCO pour ${address} ...`);
-
-  const body = new URLSearchParams({ address }).toString();
+async function requestFaucet(addressHex) {
+  console.log(`\n[Faucet] Demande d'UCO pour ${addressHex} ...`);
+  console.log(`[Faucet] URL : ${FAUCET_URL}`);
 
   const response = await fetch(FAUCET_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json, text/html",
+      Origin: TESTNET_URL,
+      Referer: `${FAUCET_URL}`,
     },
-    body,
+    body: new URLSearchParams({ address: addressHex }).toString(),
   });
 
+  const body = await response.text();
+
   if (!response.ok) {
-    throw new Error(
-      `Faucet HTTP ${response.status}: ${await response.text()}`
-    );
+    throw new Error(`Faucet HTTP ${response.status}: ${body}`);
   }
 
   console.log("[Faucet] Requête envoyée avec succès.");
@@ -65,50 +63,63 @@ async function requestFaucet(address) {
 
 // ─── Attente des fonds ───────────────────────────────────────────────────────
 
-async function waitForBalance(archethic, address, minUco = 1, timeoutMs = 90_000) {
-  console.log(`\n[Balance] Attente des fonds sur ${address} ...`);
+async function waitForBalance(archethic, addressHex, minRaw, timeoutMs = 120_000) {
+  console.log("\n[Balance] Attente des fonds ...");
   const deadline = Date.now() + timeoutMs;
-  const pollMs   = 3_000;
 
   while (Date.now() < deadline) {
-    const { uco } = await archethic.network.getBalance(address);
-    const ucoVal  = Number(uco) / 1e8;
-
-    if (ucoVal >= minUco) {
-      console.log(`[Balance] Solde reçu : ${ucoVal} UCO`);
-      return ucoVal;
+    const { uco } = await archethic.network.getBalance(addressHex);
+    // `uco` est renvoyé en unités de base par l'API GraphQL
+    if (BigInt(uco) >= minRaw) {
+      console.log(`\n[Balance] Solde confirmé : ${(uco / 1e8).toFixed(2)} UCO`);
+      return uco;
     }
-
     process.stdout.write(".");
-    await sleep(pollMs);
+    await sleep(3_000);
   }
 
-  throw new Error(
-    `Timeout : aucun fonds reçu sur ${address} après ${timeoutMs / 1000}s`
-  );
+  throw new Error(`Timeout : aucun fonds reçu après ${timeoutMs / 1000}s`);
 }
 
 // ─── Transfert ───────────────────────────────────────────────────────────────
 
+function sendTransaction(tx, confirmationThreshold = 100, timeout = 60) {
+  return new Promise((resolve, reject) => {
+    tx.on("requiredConfirmation", (nbConfirmations) => {
+      console.log(`[Transfer] ✓ Confirmé (${nbConfirmations} confirmations)`);
+      resolve(nbConfirmations);
+    })
+      .on("error", (_ctx, err) => {
+        reject(new Error(`Erreur réseau : ${JSON.stringify(err)}`));
+      })
+      .on("timeout", (nbConfirmations) => {
+        reject(
+          new Error(
+            `Timeout après ${timeout}s (${nbConfirmations} confirmations reçues)`
+          )
+        );
+      })
+      .send(confirmationThreshold, timeout);
+  });
+}
+
 async function transfer(archethic, seed, recipientAddress) {
   console.log(`\n[Transfer] Préparation du transfert de ${AMOUNT_UCO} UCO ...`);
 
-  // Index de la prochaine transaction du compte expéditeur
-  const senderAddress = Crypto.deriveAddress(seed, 0);
-  const index = await archethic.transaction.getTransactionIndex(senderAddress);
+  const senderAddressBytes = Crypto.deriveAddress(seed, 0);
+  const senderAddressHex   = toHex(senderAddressBytes);
+  const index = await archethic.transaction.getTransactionIndex(senderAddressHex);
   console.log(`[Transfer] Index de la transaction : ${index}`);
 
-  // Construction de la transaction
   const tx = archethic.transaction
     .new()
     .setType("transfer")
-    .addUCOTransfer(recipientAddress, ucoToRaw(AMOUNT_UCO))
+    .addUCOTransfer(recipientAddress, AMOUNT_RAW)
     .build(seed, index)
-    .originSign(ORIGIN_PRIVATE_KEY);
+    .originSign(Utils.originPrivateKey);
 
-  // Envoi et attente de validation (timeout 60 s)
-  await tx.send(60);
-  console.log(`[Transfer] ✓ ${AMOUNT_UCO} UCO envoyés à ${recipientAddress}`);
+  await sendTransaction(tx, 100, 60);
+  console.log(`[Transfer] ${AMOUNT_UCO} UCO envoyés à ${recipientAddress}`);
 }
 
 // ─── Point d'entrée ──────────────────────────────────────────────────────────
@@ -124,29 +135,23 @@ async function main() {
     process.exit(1);
   }
 
-  const seed = process.env.SEED || generateSeed();
+  const seed = process.env.SEED ?? generateSeed();
+  const senderAddressHex = toHex(Crypto.deriveAddress(seed, 0));
 
   console.log("=== Archethic UCO Transfer (testnet) ===");
   console.log(`Seed         : ${seed}`);
-
-  const senderAddress = Crypto.deriveAddress(seed, 0);
-  console.log(`Expéditeur   : ${senderAddress}`);
+  console.log(`Expéditeur   : ${senderAddressHex}`);
   console.log(`Destinataire : ${recipientAddress}`);
   console.log(`Montant      : ${AMOUNT_UCO} UCO`);
   console.log(`Réseau       : ${TESTNET_URL}`);
 
-  // Connexion au testnet
   const archethic = new Archethic(TESTNET_URL);
   await archethic.connect();
   console.log("\n[Réseau] Connecté au testnet Archethic.");
 
-  // 1. Demander des fonds au faucet
-  await requestFaucet(senderAddress);
-
-  // 2. Attendre que les fonds arrivent (minimum 11 UCO pour couvrir les frais)
-  await waitForBalance(archethic, senderAddress, AMOUNT_UCO + 1);
-
-  // 3. Envoyer le transfert
+  await requestFaucet(senderAddressHex);
+  // Attendre AMOUNT_UCO + 1 UCO pour couvrir les frais de transaction
+  await waitForBalance(archethic, senderAddressHex, AMOUNT_RAW + 100_000_000n);
   await transfer(archethic, seed, recipientAddress);
 
   console.log("\n=== Transfert terminé avec succès ! ===");
